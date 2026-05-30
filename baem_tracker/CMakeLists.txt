@@ -1,0 +1,4 @@
+add_library(baem_tracker INTERFACE)
+target_include_directories(baem_tracker INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(baem_tracker INTERFACE poker_core gto_engine)
+target_compile_features(baem_tracker INTERFACE cxx_std_20)

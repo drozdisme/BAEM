@@ -1,0 +1,124 @@
+name: BAEM v3 CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  BUILD_TYPE: Release
+  CXX_FLAGS: "-std=c++20 -O3 -march=native -Wno-unused-parameter -fopenmp"
+
+jobs:
+  # ── Build & Unit Tests ─────────────────────────────────────────────────
+  build-and-test:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        compiler: [g++-12, clang++-15]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.compiler }} libgomp1 cmake ninja-build
+      
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
+            -DCMAKE_CXX_FLAGS="${{ env.CXX_FLAGS }}"
+      
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+      
+      - name: Run unit tests
+        run: |
+          cd build
+          ctest --output-on-failure --timeout 300 -R "baem_core|math_validation|week5_6|week7_8"
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.compiler }}
+          path: build/Testing/
+
+  # ── HPC Performance Gate ───────────────────────────────────────────────
+  performance-gate:
+    runs-on: ubuntu-22.04
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: sudo apt-get install -y g++-12 libgomp1 cmake ninja-build
+
+      - name: Build benchmarks
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_CXX_FLAGS="${{ env.CXX_FLAGS }}"
+          cmake --build build --target bench_hpc_gates --parallel $(nproc)
+
+      - name: Run HPC gate benchmarks
+        run: |
+          ./build/benchmarks/bench_hpc_gates 2>&1 | tee bench_results.txt
+          # Fail if gates don't pass
+          grep "FAIL" bench_results.txt && exit 1 || exit 0
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench_results.txt
+
+  # ── Mathematical Validation (Full Тест 3) ─────────────────────────────
+  math-validation-full:
+    runs-on: ubuntu-22.04
+    needs: build-and-test
+    # Only on main branch (slower test)
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: sudo apt-get install -y g++-12 libgomp1 cmake ninja-build
+      
+      - name: Build and run Dynamic Regret test
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-12
+          cmake --build build --target test_week7_8 --parallel $(nproc)
+          timeout 600 ./build/tests/test_week7_8 | tee validation_results.txt
+          tail -1 validation_results.txt | grep "passed" || exit 1
+
+  # ── Package Release ────────────────────────────────────────────────────
+  release:
+    runs-on: ubuntu-22.04
+    needs: [build-and-test, performance-gate]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create release archive
+        run: |
+          zip -r baem_v3_release.zip \
+            poker_core/ gto_engine/ baem_tracker/ \
+            baem_policy/ baem_learning/ simulation/ \
+            baem_v3.hpp tests/ benchmarks/ CMakeLists.txt \
+            README.md PERFORMANCE_REPORT.md \
+            -x "*.o" -x "build/*"
+      
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: baem_v3_release
+          path: baem_v3_release.zip
+          retention-days: 90

@@ -1,0 +1,4 @@
+add_library(baem_policy INTERFACE)
+target_include_directories(baem_policy INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(baem_policy INTERFACE baem_tracker gto_engine)
+target_compile_features(baem_policy INTERFACE cxx_std_20)

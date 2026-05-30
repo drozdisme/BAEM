@@ -1,0 +1,48 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release (AVX-512, OpenMP)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-std=c++20 -O3 -march=native -mavx512f -mavx512dq -fopenmp -ffast-math"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug (ASan)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-std=c++20 -O0 -g -fsanitize=address -fsanitize=undefined -fopenmp"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI (portable, no native)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ci",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-std=c++20 -O3 -fopenmp -Wno-unused-parameter"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "debug",   "configurePreset": "debug" },
+    { "name": "ci",      "configurePreset": "ci" }
+  ],
+  "testPresets": [
+    {
+      "name": "ci",
+      "configurePreset": "ci",
+      "output": { "outputOnFailure": true },
+      "execution": { "timeout": 300 }
+    }
+  ]
+}

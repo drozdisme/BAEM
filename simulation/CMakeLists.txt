@@ -1,0 +1,7 @@
+add_library(simulation INTERFACE)
+target_include_directories(simulation INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(simulation INTERFACE baem_tracker baem_policy baem_learning OpenMP::OpenMP_CXX)
+target_compile_features(simulation INTERFACE cxx_std_20)
+if(OpenMP_CXX_FOUND)
+    target_compile_options(simulation INTERFACE ${OpenMP_CXX_FLAGS})
+endif()
