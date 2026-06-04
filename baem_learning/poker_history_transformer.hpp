@@ -53,7 +53,7 @@ using baem::RangeBuffer;
 // ─── Конфигурация трансформера ──────────────────────────────────────────────
 struct PHTransformerConfig {
     // Трансформер
-    int   embed_dim   = 32;   // размерность эмбеддинга (кратно num_heads)
+    int   embed_dim   = 64;   // = FEATURE_DIM: вход подаётся как 1 токен, все 64 фичи (вкл. карманные карты 52..63)
     int   ff_hidden   = 128;  // скрытый слой FF
     int   num_heads   = 4;    // головы внимания
     int   num_layers  = 2;    // число блоков
@@ -229,6 +229,47 @@ public:
 #endif
     }
 
+    // ── Train step напрямую от вектора признаков (для офлайн-обучения) ───────
+    // Позволяет обучать на заранее закодированных фичах (включая карманные карты),
+    // минуя HandHistoryEncoder. Используется офлайн-тренером на PokerBench.
+    float train_step_features(const FeatureVec& fv,
+                              poker::ActionType observed_action,
+                              float             lr_scale = 1.0f) noexcept
+    {
+        double feat[64];
+        for (int i = 0; i < INPUT_DIM; ++i) feat[i] = static_cast<double>(fv[i]);
+        return train_from_feat(feat, static_cast<int>(observed_action), lr_scale);
+    }
+
+    // ── Inference напрямую от вектора признаков ──────────────────────────────
+    void infer_probs(const FeatureVec& fv, float out_probs[OUTPUT_DIM]) const noexcept {
+        compute_probs(fv.data(), out_probs);
+    }
+
+    // ── Батчевое обучение от векторов признаков (офлайн на PokerBench) ────────
+    // weights[i] — вес класса примера i (для борьбы с дисбалансом).
+    // Под HAVE_UNIFIED_ML использует настоящий TransformerEncoder с одним
+    // backward на весь батч (быстро). Иначе — поэлементный MLP-fallback.
+    // Возвращает средний loss по батчу.
+    float train_batch_features(const std::vector<FeatureVec>& fvs,
+                               const std::vector<int>&        labels,
+                               const std::vector<float>&      weights,
+                               float                          lr_scale = 1.0f) noexcept
+    {
+#ifdef HAVE_UNIFIED_ML
+        return train_batch_unified(fvs, labels, weights, lr_scale);
+#else
+        float tot = 0.0f;
+        for (size_t i = 0; i < fvs.size(); ++i) {
+            double feat[64];
+            for (int j = 0; j < INPUT_DIM; ++j) feat[j] = static_cast<double>(fvs[i][j]);
+            float w = (i < weights.size()) ? weights[i] : 1.0f;
+            tot += train_from_feat(feat, labels[i], lr_scale * w);
+        }
+        return fvs.empty() ? 0.0f : tot / fvs.size();
+#endif
+    }
+
     // ── Параметры для NaturalGradientOptimizer ────────────────────────────────
     // В standalone-режиме: возвращаем размер параметрического пространства
     [[nodiscard]] int num_parameters() const noexcept {
@@ -291,8 +332,12 @@ private:
         FeatureVec fv = hist_encoder_.encode(spub);
         double feat[64];  // INPUT_DIM=64
         for (int i = 0; i < INPUT_DIM; ++i) feat[i] = static_cast<double>(fv[i]);
+        return train_from_feat(feat, static_cast<int>(observed_action), lr_scale);
+    }
 
-        const int target = static_cast<int>(observed_action);
+    // Ядро обучения standalone-MLP: forward + manual backprop + Adam.
+    float train_from_feat(const double feat[64], int target, float lr_scale) noexcept
+    {
         MLPWeights& W = encoder_.weights_;
 
         // ── Forward pass ──────────────────────────────────────────────────────
@@ -458,6 +503,53 @@ private:
         ++train_steps_;
         return loss;
     }
+
+    // Батчевый шаг на настоящем трансформере: один backward на весь батч.
+    float train_batch_unified(const std::vector<FeatureVec>& fvs,
+                              const std::vector<int>&        labels,
+                              const std::vector<float>&      weights,
+                              float                          lr_scale) noexcept
+    {
+        if (!tf_encoder_ || fvs.empty()) return 0.0f;
+        const int B = static_cast<int>(fvs.size());
+        const std::size_t E = static_cast<std::size_t>(cfg_.embed_dim);
+
+        // Вход [B, 1, E]: каждая раздача — один токен с вектором фич (E=64).
+        std::vector<double> in(B * E, 0.0);
+        int copy_n = std::min(INPUT_DIM, static_cast<int>(E));
+        for (int b = 0; b < B; ++b)
+            for (int j = 0; j < copy_n; ++j)
+                in[b * E + j] = static_cast<double>(fvs[b][j]);
+        autograd::Tensor x(in, {static_cast<std::size_t>(B), 1, E}, false);
+
+        autograd::Tensor logits = tf_encoder_->classify(x);     // [B, OUTPUT_DIM]
+        autograd::Tensor logp   = autograd::log(autograd::softmax(logits));
+
+        // Взвешенный one-hot: в строке b на позиции target — вес класса.
+        std::vector<double> oh(static_cast<std::size_t>(B) * OUTPUT_DIM, 0.0);
+        double wsum = 0.0;
+        for (int b = 0; b < B; ++b) {
+            int t = std::min(std::max(labels[b], 0), OUTPUT_DIM - 1);
+            double w = (b < (int)weights.size()) ? weights[b] : 1.0;
+            oh[b * OUTPUT_DIM + t] = w;
+            wsum += w;
+        }
+        autograd::Tensor onehot(oh, {static_cast<std::size_t>(B), OUTPUT_DIM}, false);
+        autograd::Tensor prod = logp * onehot;
+        autograd::Tensor s    = autograd::sum(prod);
+        double norm = (wsum > 0.0) ? wsum : double(B);
+        autograd::Tensor loss = s * (-1.0 / norm);              // взвешенная CE
+
+        tf_optimizer_->zero_grad();
+        if (lr_scale != 1.0f)
+            tf_optimizer_->set_learning_rate(cfg_.lr * static_cast<double>(lr_scale));
+        loss.backward();
+        tf_optimizer_->step();
+
+        float l = static_cast<float>(loss.data_ptr()[0]);
+        last_loss_ = l; train_steps_ += B;
+        return l;
+    }
 #endif // HAVE_UNIFIED_ML
 };
 
@@ -472,6 +564,23 @@ inline bool PokerHistoryTransformer::save_weights(const char* path) const noexce
     };
     write_vec(encoder_.weights_.W1); write_vec(encoder_.weights_.b1);
     write_vec(encoder_.weights_.W2); write_vec(encoder_.weights_.b2);
+#ifdef HAVE_UNIFIED_ML
+    // Тег + конфиг + параметры настоящего трансформера.
+    if (tf_encoder_) {
+        const char tag[4] = {'U','M','L','1'};
+        std::fwrite(tag, 1, 4, f);
+        int hdr[4] = {cfg_.embed_dim, cfg_.ff_hidden, cfg_.num_heads, cfg_.num_layers};
+        std::fwrite(hdr, sizeof(int), 4, f);
+        auto params = tf_encoder_->parameters();
+        std::size_t np = params.size();
+        std::fwrite(&np, sizeof(np), 1, f);
+        for (auto* p : params) {
+            std::size_t n = p->numel();
+            std::fwrite(&n, sizeof(n), 1, f);
+            std::fwrite(p->data_ptr(), sizeof(double), n, f);
+        }
+    }
+#endif
     std::fclose(f);
     return true;
 }
@@ -480,13 +589,36 @@ inline bool PokerHistoryTransformer::load_weights(const char* path) noexcept {
     FILE* f = std::fopen(path, "rb");
     if (!f) return false;
     auto read_vec = [&](std::vector<double>& v) {
-        std::size_t n; std::fread(&n, sizeof(n), 1, f);
-        v.resize(n); std::fread(v.data(), sizeof(double), n, f);
+        std::size_t n = 0;
+        if (std::fread(&n, sizeof(n), 1, f) != 1) { v.clear(); return; }
+        v.resize(n);
+        if (n) { size_t got = std::fread(v.data(), sizeof(double), n, f); (void)got; }
     };
     read_vec(encoder_.weights_.W1); read_vec(encoder_.weights_.b1);
     read_vec(encoder_.weights_.W2); read_vec(encoder_.weights_.b2);
-    // Reinit Adam state
+    // Reinit Adam state (MLP)
     adam_state_ = AdamStateMLP(encoder_.weights_, cfg_.lr);
+#ifdef HAVE_UNIFIED_ML
+    char tag[4] = {0,0,0,0};
+    if (tf_encoder_ && std::fread(tag, 1, 4, f) == 4 &&
+        tag[0]=='U'&&tag[1]=='M'&&tag[2]=='L'&&tag[3]=='1') {
+        int hdr[4] = {0,0,0,0};
+        size_t gh = std::fread(hdr, sizeof(int), 4, f); (void)gh;
+        // Конфиг весов должен совпадать с конфигом этого агента.
+        if (hdr[0]!=cfg_.embed_dim || hdr[1]!=cfg_.ff_hidden ||
+            hdr[2]!=cfg_.num_heads || hdr[3]!=cfg_.num_layers) {
+            std::fclose(f); return false;  // несовместимая архитектура
+        }
+        std::size_t np = 0; size_t g1 = std::fread(&np, sizeof(np), 1, f); (void)g1;
+        auto params = tf_encoder_->parameters();
+        if (np != params.size()) { std::fclose(f); return false; }
+        for (auto* p : params) {
+            std::size_t n = 0; size_t g2 = std::fread(&n, sizeof(n), 1, f); (void)g2;
+            if (n != p->numel()) { std::fclose(f); return false; }
+            size_t g3 = std::fread(p->data_ptr(), sizeof(double), n, f); (void)g3;
+        }
+    }
+#endif
     std::fclose(f);
     return true;
 }

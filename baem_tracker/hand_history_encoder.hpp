@@ -106,6 +106,41 @@ public:
         return v;
     }
 
+    // ── Кодирование с карманными картами (hero policy) ───────────────────────
+    // Заполняет зарезервированные слоты [52..63] признаками руки героя.
+    // Без этого сеть видит только публичное состояние и не может выучить
+    // зависящие от руки решения (что и требуется для игры как hero на PokerBench).
+    [[nodiscard]] FeatureVec encode(const poker::PublicState& spub,
+                                    poker::Card h1, poker::Card h2) const noexcept {
+        FeatureVec v = encode(spub);
+        if (!h1.valid() || !h2.valid()) return v;
+
+        int r1 = h1.rank(), r2 = h2.rank();   // 0=2 … 12=A
+        int s1 = h1.suit(), s2 = h2.suit();
+        int hi  = std::max(r1, r2);
+        int lo  = std::min(r1, r2);
+        int gap = hi - lo;
+
+        v[52] = static_cast<float>(r1) / 12.0f;
+        v[53] = static_cast<float>(r2) / 12.0f;
+        v[54] = (s1 == s2) ? 1.0f : 0.0f;                 // suited
+        v[55] = (r1 == r2) ? 1.0f : 0.0f;                 // pair
+        v[56] = static_cast<float>(hi) / 12.0f;
+        v[57] = static_cast<float>(lo) / 12.0f;
+        v[58] = static_cast<float>(gap) / 12.0f;
+        v[59] = static_cast<float>(s1) / 3.0f;
+        v[60] = static_cast<float>(s2) / 3.0f;
+        v[61] = (gap <= 1) ? 1.0f : 0.0f;                 // connected
+        v[62] = (lo >= 8) ? 1.0f : 0.0f;                  // both broadway (T+)
+        // [63] грубый прокси силы руки (нормализованный Chen-подобный балл)
+        float strength = static_cast<float>(hi) * 1.0f
+                       + (r1 == r2 ? 6.0f : 0.0f)
+                       + (s1 == s2 ? 2.0f : 0.0f)
+                       - static_cast<float>(gap) * 0.5f;
+        v[63] = std::clamp(strength / 24.0f, 0.0f, 1.0f);
+        return v;
+    }
+
     // Batch-кодирование: массив s_pub → матрица [N × FEATURE_DIM]
     // out должен иметь размер N * FEATURE_DIM
     void encode_batch(

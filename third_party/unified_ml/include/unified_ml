@@ -1,0 +1,12 @@
+#pragma once
+
+/**
+ * @file unified_ml
+ * @brief Extensionless top-level include entry point for the unified_ml SDK.
+ *
+ * Allows idiomatic integration with `#include <unified_ml>` while routing to
+ * the stable public SDK surface.
+ */
+
+#include "unified_ml_version.hpp"
+#include "unified_ml.hpp"
