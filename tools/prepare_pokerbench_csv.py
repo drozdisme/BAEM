@@ -39,11 +39,14 @@ def to_bb100(x):
 def label_from_decision(dec):
     d = str(dec).strip().lower()
     if not d: return None
-    if "all" in d and "in" in d: return 4
+    if "all" in d and "in" in d: return 4           # allin / all-in / all in
+    if "shove" in d or "jam" in d: return 4
     if d.startswith("fold"):  return 0
     if d.startswith("check"): return 1
     if d.startswith("call"):  return 2
     if d.startswith("bet") or d.startswith("raise"): return 3
+    # PokerBench (особенно preflop) часто пишет рейз как чистый размер: "2.5bb", "13.0"
+    if re.search(r"[0-9]", d) or "bb" in d: return 3
     return None
 
 def amt_bb100_from(token):

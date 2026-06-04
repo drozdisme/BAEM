@@ -44,5 +44,13 @@ echo "[build] train_pokerbench ..."
 g++ -std=c++20 $ARCH $DEFS $INCS "$TOOLS/train_pokerbench.cpp" $LIB -o "$OUT/train_pokerbench"
 echo "[build] play_pokerbench ..."
 g++ -std=c++20 $ARCH $DEFS $INCS "$TOOLS/play_pokerbench.cpp"  $LIB -o "$OUT/play_pokerbench"
+echo "[build] table_play (арена v1) ..."
+g++ -std=c++20 $ARCH $DEFS $INCS "$TOOLS/table_play.cpp"       $LIB -o "$OUT/table_play"
 
-echo "[build] OK -> $OUT/{train_pokerbench, play_pokerbench}"
+# ── v2: сайзинг + фичи рука×борд (самодостаточны, без unified) ──
+echo "[build] train_v2 (сайзинг) ..."
+g++ -std=c++20 $ARCH -I"$ROOT" "$TOOLS/train_v2.cpp"  -o "$OUT/train_v2"
+echo "[build] arena_v2 (сайзинг) ..."
+g++ -std=c++20 $ARCH -I"$ROOT" "$TOOLS/arena_v2.cpp"  -o "$OUT/arena_v2"
+
+echo "[build] OK -> $OUT/{train_pokerbench, play_pokerbench, table_play, train_v2, arena_v2}"
