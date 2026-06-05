@@ -161,7 +161,81 @@ inline int raise_bucket(float frac){
     return ALLIN;
 }
 
-// ─── PolicyNet: 3-слойный MLP (FV2→H1→H2→NUM_ACT) с Adam ──────────────────────
+// ─── PolicyNet ────────────────────────────────────────────────────────────────
+// ПО УМОЛЧАНИЮ — MLP (быстрый, лучше работает на ручных фичах: val_acc ~0.75).
+// Трансформер unified_ml — ОПЦИОНАЛЬНО, только при -DUSE_TF_PRIOR (эксперимент;
+// на seq_len=1 он уступает MLP из-за layernorm над ручными фичами).
+#if defined(HAVE_UNIFIED_ML) && defined(USE_TF_PRIOR)
+} // close namespace pv2 to include external headers cleanly
+#include "models/transformer/transformer_block.hpp"
+#include "core/optimizers.hpp"
+#include "autograd/tensor.h"
+#include <memory>
+namespace pv2 {
+struct PolicyNet {
+    static constexpr int IN=FV2_DIM, OUT=NUM_ACT;
+    transformer::TransformerConfig cfg;
+    std::unique_ptr<transformer::TransformerEncoder> enc;
+    std::unique_ptr<core::Adam> opt;
+    double lr=6e-4;
+
+    PolicyNet(){ init(); }
+    void init(){
+        cfg.embed_dim=IN; cfg.ff_hidden_dim=192; cfg.num_heads=4; cfg.num_layers=2;
+        cfg.num_classes=OUT; cfg.max_seq_len=1; cfg.causal=false;
+        enc=std::make_unique<transformer::TransformerEncoder>(cfg);
+        opt=std::make_unique<core::Adam>(enc->parameters(), lr);
+    }
+    void infer(const std::array<float,FV2_DIM>& fv, float* probs) const {
+        std::vector<double> in(IN); for(int i=0;i<IN;i++)in[i]=fv[i];
+        autograd::Tensor x(in,{1,1,(size_t)IN},false);
+        autograd::Tensor logits=enc->classify(x);
+        const double* lp=logits.data_ptr();
+        double mx=lp[0]; for(int i=1;i<OUT;i++)mx=std::max(mx,lp[i]);
+        double s=0,e[OUT]; for(int i=0;i<OUT;i++){e[i]=std::exp(lp[i]-mx);s+=e[i];}
+        for(int i=0;i<OUT;i++)probs[i]=(float)(e[i]/s);
+    }
+    float train_batch(const std::vector<std::array<float,FV2_DIM>>&X,
+                      const std::vector<int>&Y, const std::vector<float>&W){
+        int B=(int)X.size(); if(!B)return 0.0f;
+        std::vector<double> in((size_t)B*IN,0.0);
+        for(int b=0;b<B;b++)for(int i=0;i<IN;i++)in[(size_t)b*IN+i]=X[b][i];
+        autograd::Tensor x(in,{(size_t)B,1,(size_t)IN},false);
+        autograd::Tensor logits=enc->classify(x);                 // [B,OUT]
+        autograd::Tensor logp=autograd::log(autograd::softmax(logits));
+        std::vector<double> oh((size_t)B*OUT,0.0); double wsum=0;
+        for(int b=0;b<B;b++){int y=Y[b]; double w=(b<(int)W.size())?W[b]:1.0; oh[(size_t)b*OUT+y]=w; wsum+=w;}
+        autograd::Tensor onehot(oh,{(size_t)B,(size_t)OUT},false);
+        autograd::Tensor prod=logp*onehot;
+        autograd::Tensor s=autograd::sum(prod);
+        double norm=wsum>0?wsum:B;
+        autograd::Tensor loss=s*(-1.0/norm);
+        opt->set_learning_rate(lr);
+        opt->zero_grad(); loss.backward(); opt->step();
+        return (float)loss.data_ptr()[0];
+    }
+    bool save(const char* path) const {
+        FILE* f=std::fopen(path,"wb"); if(!f)return false;
+        const char tag[4]={'P','V','2','T'}; std::fwrite(tag,1,4,f);
+        int hdr[5]={cfg.embed_dim,cfg.ff_hidden_dim,cfg.num_heads,cfg.num_layers,cfg.num_classes};
+        std::fwrite(hdr,sizeof(int),5,f);
+        auto ps=enc->parameters(); size_t np=ps.size(); std::fwrite(&np,sizeof(np),1,f);
+        for(auto*p:ps){ size_t n=p->numel(); std::fwrite(&n,sizeof(n),1,f); std::fwrite(p->data_ptr(),sizeof(double),n,f); }
+        std::fclose(f); return true;
+    }
+    bool load(const char* path){
+        FILE* f=std::fopen(path,"rb"); if(!f)return false;
+        char tag[4]={0}; if(std::fread(tag,1,4,f)!=4||tag[0]!='P'||tag[1]!='V'||tag[2]!='2'||tag[3]!='T'){std::fclose(f);return false;}
+        int hdr[5]; size_t g=std::fread(hdr,sizeof(int),5,f); (void)g;
+        auto ps=enc->parameters(); size_t np=0; size_t g2=std::fread(&np,sizeof(np),1,f);(void)g2;
+        if(np!=ps.size()){std::fclose(f);return false;}
+        for(auto*p:ps){ size_t n=0; size_t g3=std::fread(&n,sizeof(n),1,f);(void)g3;
+            if(n!=p->numel()){std::fclose(f);return false;} size_t g4=std::fread(p->data_ptr(),sizeof(double),n,f);(void)g4; }
+        std::fclose(f); return true;
+    }
+};
+#else
+// ─── PolicyNet: 3-слойный MLP (FV2→H1→H2→NUM_ACT) с Adam (fallback) ──────────
 struct PolicyNet {
     static constexpr int IN=FV2_DIM, H1=128, H2=64, OUT=NUM_ACT;
     std::vector<double> W1,b1,W2,b2,W3,b3;
@@ -260,6 +334,7 @@ struct PolicyNet {
         return true;
     }
 };
+#endif // transformer prior (opt-in)
 
 // ─── Парсер v2-строки → поля ──────────────────────────────────────────────────
 struct Row {

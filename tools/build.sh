@@ -47,10 +47,17 @@ g++ -std=c++20 $ARCH $DEFS $INCS "$TOOLS/play_pokerbench.cpp"  $LIB -o "$OUT/pla
 echo "[build] table_play (арена v1) ..."
 g++ -std=c++20 $ARCH $DEFS $INCS "$TOOLS/table_play.cpp"       $LIB -o "$OUT/table_play"
 
-# ── v2: сайзинг + фичи рука×борд (самодостаточны, без unified) ──
-echo "[build] train_v2 (сайзинг) ..."
-g++ -std=c++20 $ARCH -I"$ROOT" "$TOOLS/train_v2.cpp"  -o "$OUT/train_v2"
-echo "[build] arena_v2 (сайзинг) ..."
-g++ -std=c++20 $ARCH -I"$ROOT" "$TOOLS/arena_v2.cpp"  -o "$OUT/arena_v2"
+# ── v2: сайзинг + фичи рука×борд. По умолчанию БЫСТРЫЙ MLP-прайор (лучше на этих фичах).
+#    Трансформер-прайор — опционально: USE_TF_PRIOR=1 bash tools/build.sh (медленнее и хуже на seq_len=1).
+V2DEFS="-I$ROOT"; V2LIB=""; V2NAME="MLP"
+if [ "${USE_TF_PRIOR:-0}" = "1" ] && [ -d "$UML/include" ]; then
+    V2DEFS="-DHAVE_UNIFIED_ML -DUSE_TF_PRIOR $INCS"; V2LIB="$LIB"; V2NAME="трансформер(эксперимент)"
+fi
+echo "[build] train_v2 ($V2NAME) ..."
+g++ -std=c++20 $ARCH $V2DEFS "$TOOLS/train_v2.cpp"  $V2LIB -o "$OUT/train_v2"
+echo "[build] arena_v2 ..."
+g++ -std=c++20 $ARCH $V2DEFS "$TOOLS/arena_v2.cpp"  $V2LIB -o "$OUT/arena_v2"
+echo "[build] probe_v2 ..."
+g++ -std=c++20 $ARCH $V2DEFS "$TOOLS/probe_v2.cpp"  $V2LIB -o "$OUT/probe_v2"
 
-echo "[build] OK -> $OUT/{train_pokerbench, play_pokerbench, table_play, train_v2, arena_v2}"
+echo "[build] OK -> $OUT/{train_pokerbench, play_pokerbench, table_play, train_v2, arena_v2, probe_v2}"
