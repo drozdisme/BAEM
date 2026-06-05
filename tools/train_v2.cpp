@@ -34,10 +34,12 @@ int main(int argc,char**argv){
     printf("[load] class dist:\n");
     for(int c=0;c<pv2::NUM_ACT;c++) printf("   %-6s %8ld (%.1f%%)\n",pv2::ANAME[c],cc[c],100.0*cc[c]/X.size());
 
-    // веса классов (обратная частота, среднее≈1)
+    // веса классов (обратная частота, среднее≈1, кап 4x чтобы редкие классы не доминировали)
     std::array<float,pv2::NUM_ACT> cw; { float m=0;int nz=0;
         for(int c=0;c<pv2::NUM_ACT;c++){ cw[c]=cc[c]?(float)X.size()/(pv2::NUM_ACT*cc[c]):0.0f; if(cc[c]){m+=cw[c];nz++;} }
-        m/=std::max(1,nz); for(int c=0;c<pv2::NUM_ACT;c++) cw[c]= cc[c]? cw[c]/m : 0.0f; }
+        m/=std::max(1,nz); for(int c=0;c<pv2::NUM_ACT;c++) cw[c]= cc[c]? std::min(4.0f, cw[c]/m) : 0.0f; }
+    printf("[weights] class weights: ");
+    for(int c=0;c<pv2::NUM_ACT;c++) printf("%s=%.2f ",pv2::ANAME[c],cw[c]); printf("\n");
 
     std::mt19937_64 rng(seed);
     std::vector<size_t> idx(X.size()); for(size_t i=0;i<idx.size();i++)idx[i]=i;
@@ -46,10 +48,15 @@ int main(int argc,char**argv){
     printf("[split] train=%zu val=%zu\n",ntr,nval);
 
     pv2::PolicyNet net; net.lr=lr;
-    auto eval_val=[&](double&acc){ long ok=0; float p[pv2::NUM_ACT];
+    auto eval_val=[&](double&acc){ long ok=0,ck_ok=0,ck_n=0,bt_ok=0,bt_n=0; float p[pv2::NUM_ACT];
         for(size_t k=ntr;k<X.size();k++){ net.infer(X[idx[k]],p);
-            int pr=(int)(std::max_element(p,p+pv2::NUM_ACT)-p); if(pr==Y[idx[k]])ok++; }
-        acc=nval?(double)ok/nval:0; };
+            int pr=(int)(std::max_element(p,p+pv2::NUM_ACT)-p), y=Y[idx[k]]; if(pr==y)ok++;
+            // CHECK vs BET discrimination — самое важное
+            if(y==pv2::CHECK){ ck_n++; if(pr==pv2::CHECK)ck_ok++; }
+            else if(y>=pv2::R33){ bt_n++; if(pr>=pv2::R33)bt_ok++; } }
+        acc=nval?(double)ok/nval:0;
+        if(nval){ printf("  check-acc=%.2f(%ld) bet-acc=%.2f(%ld)",
+            ck_n?(double)ck_ok/ck_n:0,ck_n, bt_n?(double)bt_ok/bt_n:0,bt_n); } };
 
     std::vector<std::array<float,pv2::FV2_DIM>> bx; std::vector<int> by; std::vector<float> bw;
     double best=-1; int noimp=0; auto t0=std::chrono::steady_clock::now();

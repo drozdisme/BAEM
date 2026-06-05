@@ -66,14 +66,23 @@ def tocall_preflop(prev_line, hero_pos):
     return max(0, int(round(last*100))-posted)
 
 def tocall_postflop(pf, avail):
-    a=str(avail).lower()
-    if "check" in a: return 0
-    if not isinstance(pf,str): return 0
-    last=0.0
+    a = str(avail).lower()
+    # приоритет: брать to-call прямо из "call X" в available_moves (самый точный источник)
+    m = re.search(r"call\s+([0-9]+(?:\.[0-9]+)?)", a)
+    if m:
+        return int(round(float(m.group(1)) * 100))
+    # чистый чек-спот
+    if "check" in a:
+        return 0
+    # фолбэк: последний бет/рейз в истории (может быть менее точным)
+    if not isinstance(pf, str):
+        return 0
+    last = 0.0
     for tok in pf.split("/"):
-        b=tok.upper()
-        if "BET" in b or "RAISE" in b: last=num(b)
-    return int(round(last*100))
+        b = tok.upper()
+        if "BET" in b or "RAISE" in b:
+            last = num(b)
+    return int(round(last * 100))
 
 def build_preflop(r):
     hole=cards(r.get("hero_holding") or r.get("holding"))
@@ -122,14 +131,21 @@ def main():
             line,st=build(r.to_dict()); print(st,"|",line); n+=1
             if n>=a.inspect:break
         return
-    ok=0;reasons={}
+    CLASS_NAMES = ["fold","check","call","r33","r66","r100","r150","allin"]
+    ok=0;reasons={};cdist={i:0 for i in range(8)}
     with open(a.out,"a" if a.append else "w") as fo:
         for i,(_,r) in enumerate(df.iterrows()):
             if a.limit and i>=a.limit:break
             line,st=build(r.to_dict())
             if line is None:reasons[st]=reasons.get(st,0)+1;continue
-            fo.write(line+"\n");ok+=1
+            fo.write(line+"\n"); ok+=1
+            lbl=int(line.split()[0]); cdist[lbl]=cdist.get(lbl,0)+1
     print(f"[v2] wrote {ok}/{ok+sum(reasons.values())} → {a.out}",file=sys.stderr)
     if reasons:print("[skipped]",reasons,file=sys.stderr)
+    print("[label dist]",file=sys.stderr)
+    for i,nm in enumerate(CLASS_NAMES):
+        pct=100.0*cdist.get(i,0)/max(ok,1)
+        bar="#"*int(pct/2)
+        print(f"  {nm:6s} {cdist.get(i,0):7d}  {pct:5.1f}%  {bar}",file=sys.stderr)
 
 if __name__=="__main__": main()

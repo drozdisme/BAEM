@@ -7,6 +7,7 @@
 //   ./arena_v2 --gen teacher.txt --hands 200000           # сгенерировать датасет учителя
 
 #include "poker_v2.hpp"
+#include "pushfold_gto.hpp"
 #include "../poker_core/poker_core.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -53,6 +54,8 @@ struct Arena {
     std::ofstream* gen=nullptr;
     std::array<OppStats,6> opp_{};   // онлайн-модель соперников (персистентна через раздачи)
     double amax=0.95;                // верхняя граница α*
+    pfgto::PushFold PF;              // живой GTO push/fold модуль (шаг 4b)
+    int shortstack_bb=16;            // порог короткого стека для push/fold-GTO
 
     Arena(std::vector<Seat>&& s,int st,uint64_t seed)
         : seats(std::move(s)),N((int)seats.size()),start(st),deck(seed),rng(seed^0x99),enc(&ev){
@@ -144,6 +147,15 @@ struct Arena {
     // ── Полноценный BAEM-агент: прайор Pθ + онлайн-эксплойт (Алгоритм 1) ──────
     int decide_modelx(const H&h,int i,bool facing){
         const Seat&S=seats[i];
+        // ── ШАГ 4b: на коротком HU-префлопе играем ТОЧНУЮ GTO push/fold ──
+        if(N==2 && h.street==0){
+            int eff_bb = std::min(h.stack[0]+h.tinv[0], h.stack[1]+h.tinv[1])/100;
+            if(eff_bb>=2 && eff_bb<=shortstack_bb){
+                int tc=h.cur-h.sinv[i];
+                if(tc>0) return PF.bb_call(h.a[i],h.b[i],eff_bb)? CALL : FOLD;   // BB vs шов
+                else     return PF.sb_push(h.a[i],h.b[i],eff_bb)? ALLIN : FOLD;  // SB шов/фолд
+            }
+        }
         int P=pot(h), tocall=h.cur-h.sinv[i], stack=h.stack[i], sinv=h.sinv[i];
 
         // (1) прайор π_GTO от обученной сети Pθ (ур. 11)
@@ -334,6 +346,7 @@ int main(int argc,char**argv){
         else if(a=="--hands")hands=atol(nx().c_str());
         else if(a=="--seed")seed=strtoull(nx().c_str(),0,10);
         else if(a=="--gen")genfile=nx();
+        else if(a=="--stackbb")start=atoi(nx().c_str())*100;
     }
 
     if(!genfile.empty()){

@@ -113,11 +113,30 @@ int main(int argc,char**argv){
         poker::Card a=poker::Card{(uint8_t)idx[3]}, b=poker::Card{(uint8_t)idx[4]};
         float eq=equity(a,b,bd2,500);
         auto fv=ENC.encode(bd2,a,b,1,300,0,1); float p[NUM_ACT]; NET.infer(fv,p);
+        // tocall=0 → fold и call нелегальны, нормируем без них (как в арене)
+        p[FOLD]=0; p[CALL]=0;
+        { float ss=0; for(int k=0;k<NUM_ACT;k++)ss+=p[k]; if(ss>0)for(int k=0;k<NUM_ACT;k++)p[k]/=ss; }
         float aggr=p[R33]+p[R66]+p[R100]+p[R150]+p[ALLIN];
         int bk=std::min(4,(int)(eq*5)); aggr_sum[bk]+=aggr; aggr_n[bk]++;
     }
     for(int k=0;k<5;k++) printf("  эквити %2d-%2d%%: P(ставка)=%.2f (n=%ld)\n",
         k*20,(k+1)*20, aggr_n[k]?aggr_sum[k]/aggr_n[k]:0.0, aggr_n[k]);
     printf("\n(хороший агент: P(fold) растёт с ценой; P(ставка) растёт с эквити)\n");
+
+    // ── Диагноз «маньяк»: смотрим сырые логиты без маскинга для 3 спотов ──
+    printf("\n=== СЫРЫЕ ВЕРОЯТНОСТИ (без маскинга) — диагноз «маньяк» ===\n");
+    printf("Если CHECK и BET-классы вместе << 1 — утечка вероятности в FOLD/CALL\n");
+    auto raw=[&](const char* lbl, poker::Card a, poker::Card b,
+                 const poker::CardSet& bd, int st, int pot, int tc, int ip){
+        auto fv=ENC.encode(bd,a,b,st,pot,tc,ip); float p[NUM_ACT]; NET.infer(fv,p);
+        printf("%-34s  ",lbl);
+        for(int k=0;k<NUM_ACT;k++) printf("%s=%.2f ",ANAME[k],p[k]);
+        printf("\n  sum(bet)=%.2f  check=%.2f  fold=%.2f  call=%.2f\n",
+            p[R33]+p[R66]+p[R100]+p[R150]+p[ALLIN],p[CHECK],p[FOLD],p[CALL]);
+    };
+    raw("AA чек-спот (tocall=0)", C(_A,s),C(_A,h), none, 0,150,0,1);
+    raw("72o чек-спот (tocall=0)", C(_7,c),C(_2,d), none, 0,150,0,0);
+    raw("72o vs рейз (tocall=300)", C(_7,c),C(_2,d), none, 0,450,300,0);
+    printf("\nЕсли fold+call занимают > 20%% в check-спотах → tocall-признак был испорчен в обучении\n");
     return 0;
 }
