@@ -306,6 +306,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.5);}
   </div>
   <div class="act-sep"></div>
   <button class="act-btn" onclick="WB.newHand()" style="margin-left:auto;">New Hand</button>
+  <button class="act-btn" onclick="WB.resetGame()" style="border-color:var(--gold-d);">New Game</button>
 </div>
 
 <div class="log">
@@ -339,6 +340,7 @@ const WB = {
     this._nh  = Mod.cwrap('engine_new_hand',  null,   []);
     this._act  = Mod.cwrap('engine_action',   null,   ['number','number']);
     this._gs   = Mod.cwrap('engine_get_state','string',[]);
+    try { this._reset = Mod.cwrap('engine_reset_game', null, []); } catch(e){ this._reset=null; }
     this.useWasm = true;
     document.getElementById('enginePill').textContent = '● wasm';
     document.getElementById('enginePill').className = 'h-pill live';
@@ -366,6 +368,21 @@ const WB = {
       renderState(JSON.parse(this._gs()));
     } else {
       mock.newHand();
+    }
+  },
+
+  resetGame() {
+    if (this.useWasm && this._reset) {
+      this._reset();
+      this._nh();
+      renderState(JSON.parse(this._gs()));
+      term.write('sys','system','new game — all stacks reset to 10,000');
+    } else {
+      // mock: rebuild players with starting chips
+      mock.players = mock._mkPlayers(CFG.players);
+      mock.hN = 0;
+      mock.newHand();
+      term.write('sys','system','new game — all stacks reset');
     }
   }
 };
@@ -395,15 +412,22 @@ const mock = new(class{
   /* ── build player array ─────────────── */
   _mkPlayers(n){
     const names=['VIKING','GHOST','ORACLE','WRAITH','TITAN','HERO'];
-    const pos6  =['UTG','UTG+1','HJ','CO','SB','BTN'];
-    const pos   =['P1','P2','P3','P4','SB','BTN'];
+    // standard seating: 0=SB, 1=BB, 2..n-2 = UTG/HJ/CO, n-1 = BTN (hero)
+    const labelFor=(i)=>{
+      if(i===n-1) return 'BTN';
+      if(i===0)   return 'SB';
+      if(i===1)   return 'BB';
+      const mid=['UTG','HJ','CO','MP','LJ'];
+      return mid[i-2] || `P${i}`;
+    };
+    const chips=(typeof CFG!=="undefined"?CFG.chips:10000);
     const arr=[];
     for(let i=0;i<n;i++){
       arr.push({
         id:   i===n-1?'hero':`p${i+1}`,
-        name: n===6?names[i]:i===n-1?'HERO':names[i],
-        pos:  n===6?pos6[i]:i===n-1?'BTN':i===n-2?'SB':pos[i],
-        chips:(typeof CFG!=="undefined"?CFG.chips:10000), bet:0,
+        name: i===n-1?'HERO':names[i%names.length],
+        pos:  labelFor(i),
+        chips, bet:0,
         folded:false, allin:false, cards:[], isHero:i===n-1
       });
     }
@@ -424,14 +448,14 @@ const mock = new(class{
     this.players.forEach(p=>{ p.bet=0;p.folded=false;p.allin=false;
       p.cards=[this.deck.pop(),this.deck.pop()]; });
 
-    // blinds: SB = index n-2, BB = index n-3 (or 0 if n<=3)
-    const sbI=n-2, bbI=n<=3?0:n-3;
+    // blinds: SB=index 0, BB=index 1
+    const sbI=0, bbI=1%n;
     this._post(sbI, CFG.sb);
     this._post(bbI, CFG.bb);
-    this.toCall=Math.min(CFG.bb, this.players[bbI].bet+this.players[bbI].chips);
+    this.toCall=CFG.bb;
     this.minRaise=CFG.bb*2;
 
-    // preflop first to act = player after BB
+    // preflop first to act = player after BB (UTG); _nextActor advances from bbI
     this.actIdx=bbI;
     this._nextActor();
 
@@ -564,8 +588,8 @@ const mock = new(class{
       this._showdown(); return;
     }
 
-    // post-flop first to act: first active player left of BTN (= index 0, wrap)
-    this.actIdx=n-1; // start search from BTN
+    // post-flop first to act: SB first (index 0); search starting from BTN wraps to 0
+    this.actIdx=n-1; // BTN, _nextActor wraps to index 0 (SB)
     this._nextActor();
     this._emit();
     this._botStep();
