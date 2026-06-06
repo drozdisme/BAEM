@@ -326,51 +326,61 @@ static float mc_equity(int pi, int nsims){
   return (wins + 0.5f*ties)/(float)nsims;
 }
 
-// ── Bot decision: equity + pot-odds + position, with mixing ──
+// ── Bot decision: equity-based, tuned for lively multiway play ──
 static void bot_act(int pi){
   if(P[pi].folded||P[pi].allin) return;
   int tc       = std::max(0, TO_CALL - P[pi].bet);
   int maxTotal = P[pi].chips + P[pi].bet;
   int callTo   = P[pi].bet + tc;
 
-  float eq = mc_equity(pi, 160);
-  float r  = randu();
-  bool  ip = (P[pi].posRank >= 3);   // in position → slightly more aggressive
+  bool preflop = (strcmp(STREET,"preflop")==0);
+  int  nopp    = std::max(1, count_active()-1);
+  float eq     = mc_equity(pi, 160);
+  float r      = randu();
+  bool  ip     = (P[pi].posRank >= 3);
 
-  // helper: make a pot-relative raise, never auto-shoving unless it must
   auto raiseFrac=[&](float frac){
     int sz = (int)((POT + tc) * frac);
     int to = callTo + sz;
     if(to < MIN_RAISE) to = MIN_RAISE;
-    if(to >= maxTotal) to = maxTotal;        // becomes all-in only if pot is huge vs stack
+    if(to >= maxTotal) to = maxTotal;
     if(to <= callTo){ do_call(pi); return; }
     do_raise(pi, to);
   };
 
-  if(tc > 0){
-    // ── facing a bet ──
-    float potOdds = (float)tc / (float)(POT + tc);
-    float foldLine = potOdds + (ip?0.02f:0.06f);
+  if(preflop){
+    // raw multiway equity is misleadingly low — compare to fair share instead
+    float fair     = 1.0f/(float)(nopp+1);
+    float strength = eq / fair;            // 1.0 = average hand; >1 above average
+    if(tc>0){
+      // facing a raise: defend with above-average hands, 3-bet the best
+      if(strength < 0.85f){ if(r<0.82f){ do_fold(pi); return; } }
+      if(strength > 1.7f && r<0.45f){ raiseFrac(0.8f); return; }
+      do_call(pi); return;
+    } else {
+      // open/limp: raise good hands, see flop with the rest
+      if(strength > 1.25f && r<0.62f){ raiseFrac(0.9f); return; }
+      do_call(pi); return;
+    }
+  }
 
-    if(eq < foldLine){
-      // usually fold; occasionally float/bluff-catch in position
-      if(ip && r < 0.12f){ do_call(pi); return; }
+  // ── postflop ──
+  if(tc>0){
+    float potOdds = (float)tc/(float)(POT+tc);
+    if(eq < potOdds - 0.02f){
+      if(ip && r<0.16f){ do_call(pi); return; }   // occasional float in position
       do_fold(pi); return;
     }
-    // strong → value raise sometimes
-    if(eq > 0.78f && r < 0.45f){ raiseFrac(0.6f + 0.3f*randu()); return; }
-    if(eq > 0.62f && r < 0.18f){ raiseFrac(0.5f); return; }
-    // otherwise call
+    if(eq > 0.70f && r<0.62f){ raiseFrac(0.65f + 0.30f*randu()); return; }   // value
+    if(eq > 0.52f && r<0.32f){ raiseFrac(0.5f); return; }                    // thin value
     do_call(pi); return;
-
   } else {
-    // ── no bet: check or bet ──
-    if(eq > 0.66f){                       // value bet strong hands
-      if(r < (ip?0.72f:0.6f)){ raiseFrac(0.55f + 0.25f*randu()); return; }
-    } else if(eq < 0.34f && r < (ip?0.16f:0.08f)){  // occasional bluff
-      raiseFrac(0.5f); return;
+    if(eq > 0.55f){                                   // value bet
+      if(r < (ip?0.82f:0.70f)){ raiseFrac(0.6f + 0.25f*randu()); return; }
+    } else if(eq < 0.42f && r < (ip?0.26f:0.16f)){    // bluff
+      raiseFrac(0.55f); return;
     }
-    do_call(pi); return;                  // check
+    do_call(pi); return;                              // check
   }
 }
 
