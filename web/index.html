@@ -1124,17 +1124,12 @@ term.write('sys','system','keys: [F] fold  [C] call/check  [R] raise  [N] new ha
 //   Module.onRuntimeInitialized = () => WB.init(Module);
 </script>
 
-<!-- ══ PRODUCTION WASM INTEGRATION ══════════════════════════
-  After running  cd baem/web && bash build_wasm.sh  uncomment:
 
-  <script src="baem_engine.js"></script>
-  <script>
-    Module.onRuntimeInitialized = function() { WB.init(Module); };
-  </script>
+<script src="baem_engine.js"></script>
+<script>
+  Module.onRuntimeInitialized = function() { WB.init(Module); };
+</script>
 
-  Then deploy all three files:
-    index.html  +  baem_engine.js  +  baem_engine.wasm
-═══════════════════════════════════════════════════════════ -->
 
 
 <!-- SETTINGS MODAL -->
