@@ -342,8 +342,12 @@ const WB = {
     this.useWasm = true;
     document.getElementById('enginePill').textContent = '● wasm';
     document.getElementById('enginePill').className = 'h-pill live';
-    term.write('eng','wasm','C++ engine active — real BAEM PolicyNet running in browser');
-    this.newHand();
+    // delay so term/G are fully initialized before use
+    setTimeout(() => {
+      try { term.write('eng','wasm','C++ engine active — real BAEM PolicyNet running'); }
+      catch(e){}
+      this.newHand();
+    }, 100);
   },
 
   async sendAction(type, amount=0) {
@@ -375,6 +379,8 @@ const REDS=new Set(['d','h']);
 function buildDeck(){const d=[];for(const s of['c','d','h','s'])for(const r of RNAMES)d.push({r,s});return d;}
 function shuffle(d){for(let i=d.length-1;i>0;i--){const j=0|Math.random()*(i+1);[d[i],d[j]]=[d[j],d[i]];}return d;}
 
+const CFG = { chips: 10000, sb: 250, bb: 500, players: 6 };
+
 const mock = new(class{
   constructor(){
     this.hN=0; this.deck=[]; this.board=[];
@@ -397,7 +403,7 @@ const mock = new(class{
         id:   i===n-1?'hero':`p${i+1}`,
         name: n===6?names[i]:i===n-1?'HERO':names[i],
         pos:  n===6?pos6[i]:i===n-1?'BTN':i===n-2?'SB':pos[i],
-        chips:CFG.chips, bet:0,
+        chips:(typeof CFG!=="undefined"?CFG.chips:10000), bet:0,
         folded:false, allin:false, cards:[], isHero:i===n-1
       });
     }
@@ -723,6 +729,7 @@ function makeCard(c, faceUp, extraClass='', delay=0){
 let G=null;
 
 function renderState(s){
+  if(!s) return;
   G=s;
   const hero=s.players[s.heroIdx];
   const isHeroTurn=!hero.folded&&s.actIdx===s.heroIdx&&s.street!=='idle'&&s.street!=='showdown';
@@ -1072,7 +1079,6 @@ const HandEval = (() => {
 })();
 
 /* ── SETTINGS ── */
-const CFG = { chips: 10000, sb: 250, bb: 500, players: 6 };
 
 function openSettings(){
   document.getElementById('cfgChips').value   = CFG.chips;
@@ -1129,7 +1135,6 @@ term.write('sys','system','keys: [F] fold  [C] call/check  [R] raise  [N] new ha
 <script>
   Module.onRuntimeInitialized = function() { WB.init(Module); };
 </script>
-
 
 
 <!-- SETTINGS MODAL -->
