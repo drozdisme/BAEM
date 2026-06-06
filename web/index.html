@@ -377,133 +377,297 @@ function shuffle(d){for(let i=d.length-1;i>0;i--){const j=0|Math.random()*(i+1);
 
 const mock = new(class{
   constructor(){
-    this.hN=0;this.players=this._init();this.deck=[];this.board=[];
-    this.acted=new Set();
-    this.pot=0;this.street='idle';this.toCall=0;this.minRaise=0;
-    this.actIdx=0;this.heroIdx=5;this.actLog=[];this._bt=null;
+    this.hN=0; this.deck=[]; this.board=[];
+    this.pot=0; this.street='idle';
+    this.toCall=0; this.minRaise=0;
+    this.actIdx=0; this.heroIdx=5;
+    this.actLog=[]; this.acted=new Set();
+    this._bt=null; this._botBusy=false;
+    this.players=this._mkPlayers(6);
   }
-  _init(){
-    return[
-      {id:'p1',name:'VIKING', chips:9850, pos:'UTG',   bet:0,folded:false,allin:false,cards:[],isHero:false},
-      {id:'p2',name:'GHOST',  chips:10200,pos:'UTG+1', bet:0,folded:false,allin:false,cards:[],isHero:false},
-      {id:'p3',name:'ORACLE', chips:8750, pos:'HJ',    bet:0,folded:false,allin:false,cards:[],isHero:false},
-      {id:'p4',name:'WRAITH', chips:11400,pos:'CO',    bet:0,folded:false,allin:false,cards:[],isHero:false},
-      {id:'p5',name:'TITAN',  chips:9100, pos:'SB',    bet:0,folded:false,allin:false,cards:[],isHero:false},
-      {id:'hero',name:'HERO', chips:10000,pos:'BTN',   bet:0,folded:false,allin:false,cards:[],isHero:true},
-    ];
+
+  /* ── build player array ─────────────── */
+  _mkPlayers(n){
+    const names=['VIKING','GHOST','ORACLE','WRAITH','TITAN','HERO'];
+    const pos6  =['UTG','UTG+1','HJ','CO','SB','BTN'];
+    const pos   =['P1','P2','P3','P4','SB','BTN'];
+    const arr=[];
+    for(let i=0;i<n;i++){
+      arr.push({
+        id:   i===n-1?'hero':`p${i+1}`,
+        name: n===6?names[i]:i===n-1?'HERO':names[i],
+        pos:  n===6?pos6[i]:i===n-1?'BTN':i===n-2?'SB':pos[i],
+        chips:CFG.chips, bet:0,
+        folded:false, allin:false, cards:[], isHero:i===n-1
+      });
+    }
+    return arr;
   }
+
+  /* ── start new hand ──────────────────── */
   newHand(){
-    if(this._bt)clearTimeout(this._bt);
-    this.hN++;this.deck=shuffle(buildDeck());this.board=[];
-    this.pot=0;this.street='preflop';this.actLog=[];this.acted=new Set();
-    this.toCall=500;this.minRaise=1000;
-    this.players.forEach(p=>{p.bet=0;p.folded=false;p.allin=false;p.cards=[this.deck.pop(),this.deck.pop()];});
-    // post blinds using CFG (last-1 = SB, index 0 = BB for 6p; for <6 adjust)
-    const sbIdx = Math.max(0, this.players.length-2);
-    const bbIdx = Math.max(0, this.players.length-3);
-    const SB = CFG.sb, BB = CFG.bb;
-    const sbP = this.players[sbIdx], bbP = this.players[bbIdx < sbIdx ? bbIdx : 0];
-    sbP.bet=Math.min(SB,sbP.chips); sbP.chips-=sbP.bet; this.pot+=sbP.bet;
-    bbP.bet=Math.min(BB,bbP.chips); bbP.chips-=bbP.bet; this.pot+=bbP.bet;
-    this.toCall=BB; this.minRaise=BB*2;
-    this.actIdx=1;
-    term.write('eng','engine',`hand #${String(this.hN).padStart(3,'0')} — NL Hold'em 2/5`);
-    this._emit();this._botStep();
+    if(this._bt){clearTimeout(this._bt);this._bt=null;}
+    this._botBusy=false;
+    const n=this.players.length;
+
+    // restore busted players
+    this.players.forEach(p=>{ if(p.chips<=0) p.chips=CFG.chips; });
+
+    this.hN++; this.deck=shuffle(buildDeck()); this.board=[];
+    this.pot=0; this.street='preflop'; this.actLog=[]; this.acted=new Set();
+    this.players.forEach(p=>{ p.bet=0;p.folded=false;p.allin=false;
+      p.cards=[this.deck.pop(),this.deck.pop()]; });
+
+    // blinds: SB = index n-2, BB = index n-3 (or 0 if n<=3)
+    const sbI=n-2, bbI=n<=3?0:n-3;
+    this._post(sbI, CFG.sb);
+    this._post(bbI, CFG.bb);
+    this.toCall=Math.min(CFG.bb, this.players[bbI].bet+this.players[bbI].chips);
+    this.minRaise=CFG.bb*2;
+
+    // preflop first to act = player after BB
+    this.actIdx=bbI;
+    this._nextActor();
+
+    term.write('eng','engine',
+      `hand #${String(this.hN).padStart(3,'0')} — NL Hold'em ${CFG.sb}/${CFG.bb}`);
+    this._emit(); this._botStep();
   }
+
+  _post(idx,amount){
+    const p=this.players[idx];
+    const pay=Math.min(amount,p.chips);
+    p.chips-=pay; p.bet+=pay; this.pot+=pay;
+    if(p.chips===0) p.allin=true;
+  }
+
+  /* ── hero action entry ───────────────── */
   heroAction(type,amount){
-    if(this.street==='idle'||this.street==='showdown')return;
-    this._do(this.players[this.heroIdx],type,amount);
+    const n=this.players.length;
+    if(this.street==='idle'||this.street==='showdown') return;
+    if(this.actIdx!==this.heroIdx) return;  // not hero's turn
+    if(this._botBusy) return;
+    this._do(this.players[this.heroIdx], type, amount);
   }
+
+  /* ── execute one action ──────────────── */
   _do(p,type,amount){
-    if(p.folded||p.allin)return;
+    if(p.folded||p.allin) return;
+    const idx=this.players.indexOf(p);
+
     if(type==='fold'){
-      p.folded=true;push(this.actLog,p.name,'fold',0);
-      term.write(p.isHero?'hero':'bot',p.isHero?'hero':p.name,'fold');
-      this.acted.add(this.players.indexOf(p));
-    }
-    else if(type==='call'){
-      const owe=Math.max(0,this.toCall-p.bet),pay=Math.min(owe,p.chips);
-      p.chips-=pay;p.bet+=pay;this.pot+=pay;if(p.chips===0)p.allin=true;
+      p.folded=true;
+      push(this.actLog,p.name,'fold',0);
+      term.write(p.isHero?'hero':'bot', p.isHero?'hero':p.name, 'fold');
+      this.acted.add(idx);
+
+    } else if(type==='call'){
+      const owe=Math.max(0,this.toCall-p.bet);
+      const pay=Math.min(owe,p.chips);
+      p.chips-=pay; p.bet+=pay; this.pot+=pay;
+      if(p.chips===0) p.allin=true;
       const lbl=owe===0?'check':`call ${pay.toLocaleString()}`;
-      push(this.actLog,p.name,owe===0?'check':'call',pay);
-      term.write(p.isHero?'hero':'bot',p.isHero?'hero':p.name,lbl);
-      this.acted.add(this.players.indexOf(p));
-    }else if(type==='raise'){
+      push(this.actLog,p.name, owe===0?'check':'call', pay);
+      term.write(p.isHero?'hero':'bot', p.isHero?'hero':p.name, lbl);
+      this.acted.add(idx);
+
+    } else if(type==='raise'){
       const maxTotal=p.chips+p.bet;
-      const total=Math.min(Math.max(amount,this.toCall),maxTotal),add=total-p.bet;
-      if(add<=0){this._do(p,'call',0);return;}
-      p.chips-=add;this.pot+=add;p.bet=total;
-      if(p.chips<0){this.pot+=p.chips;p.chips=0;}  // safety clamp
-      this.toCall=total;this.minRaise=Math.min(p.chips+total,total*2);
-      if(p.chips===0)p.allin=true;
-      // raise = everyone else must re-act
-      this.acted=new Set([this.players.indexOf(p)]);
+      // total must be >= minRaise (or all-in if can't afford)
+      const target=Math.max(amount, this.minRaise);
+      const total=Math.min(target, maxTotal);
+      const add=total-p.bet;
+      if(add<=0){ this._do(p,'call',0); return; }
+      p.chips-=add; this.pot+=add; p.bet=total;
+      this.toCall=total;
+      this.minRaise=Math.min(p.chips+total, total+(total-this.toCall)+total);
+      this.minRaise=Math.max(this.minRaise, total*2);
+      if(p.chips===0) p.allin=true;
       push(this.actLog,p.name,'raise',total);
-      term.write(p.isHero?'hero':'bot',p.isHero?'hero':p.name,`${this.street==='preflop'&&total<=1000?'raise →':' bet'} ${add.toLocaleString()}`);
+      term.write(p.isHero?'hero':'bot', p.isHero?'hero':p.name,
+        `raise → ${total.toLocaleString()}`);
+      // on raise: everyone else must re-act
+      this.acted=new Set([idx]);
     }
+
+    // check if only 1 player left
     const alive=this.players.filter(q=>!q.folded);
-    if(alive.length===1){this._award(alive[0]);return;}
-    this._adv();this._emit();this._botStep();
+    if(alive.length===1){ this._award(alive[0]); return; }
+
+    // check street complete
+    if(this._streetDone()){
+      this._nextStreet(); return;
+    }
+
+    this._nextActor();
+    this._emit();
+    this._botStep();
   }
-  _adv(){
-    // advance to next non-folded non-allin player
+
+  /* ── is the current betting round over? ─ */
+  _streetDone(){
+    const active=this.players.filter(p=>!p.folded&&!p.allin);
+    if(active.length===0) return true;
+    // everyone has acted
+    const allActed=active.every(p=>this.acted.has(this.players.indexOf(p)));
+    if(!allActed) return false;
+    // all bets are level
+    const maxBet=Math.max(...active.map(p=>p.bet));
+    return active.every(p=>p.bet===maxBet);
+  }
+
+  /* ── advance actIdx to next eligible player ─ */
+  _nextActor(){
     const n=this.players.length;
     for(let s=0;s<n;s++){
       this.actIdx=(this.actIdx+1)%n;
       const p=this.players[this.actIdx];
-      if(!p.folded&&!p.allin) break;
+      if(!p.folded&&!p.allin) return true;
     }
-    // street complete: every active (not allin) player has acted AND bets match
-    const active=this.players.filter(p=>!p.folded&&!p.allin);
-    const allActed=active.every(p=>this.acted.has(this.players.indexOf(p)));
-    const allMatched=active.every(p=>p.bet>=this.toCall);
-    if(allActed&&allMatched) this._nextStreet();
+    return false; // all folded/allin
   }
+
+  /* ── deal next street ────────────────── */
   _nextStreet(){
-    const alive=this.players.filter(p=>!p.folded);
-    if(alive.length<=1){if(alive[0])this._award(alive[0]);return;}
-    this.players.forEach(p=>p.bet=0);this.toCall=0;this.minRaise=1000;
     this.acted=new Set();
-    const nxt={preflop:'flop',flop:'turn',turn:'river',river:'showdown'};
-    this.street=nxt[this.street]||'showdown';
-    if(this.street==='flop'){for(let i=0;i<3;i++)this.board.push(this.deck.pop());term.write('eng','engine',`flop  ${this.board.map(c=>c.r+SSYM[c.s]).join('  ')}`);}
-    else if(this.street==='turn'){this.board.push(this.deck.pop());term.write('eng','engine',`turn  ${this.board[3].r+SSYM[this.board[3].s]}`);}
-    else if(this.street==='river'){this.board.push(this.deck.pop());term.write('eng','engine',`river  ${this.board[4].r+SSYM[this.board[4].s]}`);}
-    else{this._showdown();return;}
-    this.actIdx=4;while(this.players[this.actIdx].folded||this.players[this.actIdx].allin)this.actIdx=(this.actIdx+1)%6;
-    this._emit();this._botStep();
+    this.players.forEach(p=>p.bet=0);
+    this.toCall=0; this.minRaise=CFG.bb;
+    const n=this.players.length;
+
+    if(this.street==='preflop'){
+      this.street='flop';
+      for(let i=0;i<3;i++) this.board.push(this.deck.pop());
+      term.write('eng','engine',
+        `flop  ${this.board.map(c=>c.r+SSYM[c.s]).join('  ')}`);
+    } else if(this.street==='flop'){
+      this.street='turn';
+      this.board.push(this.deck.pop());
+      term.write('eng','engine',`turn  ${this.board[3].r+SSYM[this.board[3].s]}`);
+    } else if(this.street==='turn'){
+      this.street='river';
+      this.board.push(this.deck.pop());
+      term.write('eng','engine',`river ${this.board[4].r+SSYM[this.board[4].s]}`);
+    } else {
+      this._showdown(); return;
+    }
+
+    // if nobody can act (all allin) run out board and showdown
+    const canAct=this.players.filter(p=>!p.folded&&!p.allin);
+    if(canAct.length<=1){
+      while(this.board.length<5) this.board.push(this.deck.pop());
+      this._showdown(); return;
+    }
+
+    // post-flop first to act: first active player left of BTN (= index 0, wrap)
+    this.actIdx=n-1; // start search from BTN
+    this._nextActor();
+    this._emit();
+    this._botStep();
   }
+
+  /* ── showdown ────────────────────────── */
   _showdown(){
     this.street='showdown';
-    const alive=this.players.filter(p=>!p.folded&&p.cards&&p.cards.length===2);
-    if(alive.length===0){return;}
-    if(alive.length===1){this._award(alive[0]);return;}
-    // evaluate each hand with board cards
-    let best=-1, winner=alive[0];
+    while(this.board.length<5) this.board.push(this.deck.pop());
+
+    const alive=this.players.filter(p=>!p.folded&&p.cards.length===2);
+    if(!alive.length){ term.write('err','error','showdown: no players'); return; }
+    if(alive.length===1){ this._award(alive[0]); return; }
+
+    // score all hands
+    let best=-1;
+    const winners=[];
     alive.forEach(p=>{
-      const allCards=[...p.cards,...this.board];
-      const score=HandEval.rank(allCards);
-      const name=p.name, board=this.board.map(c=>c.r+c.s).join(' ');
+      const score=HandEval.rank([...p.cards,...this.board]);
       const hand=p.cards.map(c=>c.r+c.s).join(' ');
-      DBG.log('STATE',`  showdown ${name}: [${hand}] board [${board}] → score ${score}`);
-      if(score>best){best=score;winner=p;}
+      const board=this.board.map(c=>c.r+c.s).join(' ');
+      DBG.log('STATE',
+        `  showdown ${p.name}: [${hand}] board [${board}] → score ${score}`);
+      if(score>best){ best=score; winners.length=0; }
+      if(score===best) winners.push(p);
     });
-    this._award(winner);
+
+    if(winners.length===1){
+      this._award(winners[0]);
+    } else {
+      // split pot
+      const share=Math.floor(this.pot/winners.length);
+      winners.forEach(p=>{ p.chips+=share; });
+      const names=winners.map(p=>p.name).join(' & ');
+      push(this.actLog,names,'split',this.pot);
+      term.write('win','result',
+        `split pot — ${names} each win ${share.toLocaleString()}`);
+      this.pot=0; this._emit();
+    }
   }
-  _award(w){this.street='showdown';const won=this.pot;w.chips+=won;this.pot=0;push(this.actLog,w.name,'win',won);term.write('win','result',`${w.name} wins ${won.toLocaleString()} chips`);this._emit();setTimeout(()=>{document.querySelectorAll('.p-slot').forEach(el=>{el.classList.toggle('winner',el.dataset.pid===w.id)});setTimeout(()=>document.querySelectorAll('.p-slot').forEach(el=>el.classList.remove('winner')),2200);},150);}
+
+  /* ── award pot to winner ─────────────── */
+  _award(w){
+    this.street='showdown';
+    const won=this.pot; w.chips+=won; this.pot=0;
+    push(this.actLog,w.name,'win',won);
+    term.write('win','result',`${w.name} wins ${won.toLocaleString()} chips`);
+    this._emit();
+    setTimeout(()=>{
+      document.querySelectorAll('.p-slot').forEach(el=>{
+        el.classList.toggle('winner', el.dataset.pid===w.id);
+      });
+      setTimeout(()=>
+        document.querySelectorAll('.p-slot').forEach(el=>
+          el.classList.remove('winner')), 2200);
+    }, 150);
+  }
+
+  /* ── bot decision ────────────────────── */
   _botStep(){
-    if(this.street==='idle'||this.street==='showdown')return;
-    const p=this.players[this.actIdx];if(p.isHero||p.folded||p.allin)return;
+    if(this.street==='idle'||this.street==='showdown') return;
+    if(this._botBusy) return;
+    const p=this.players[this.actIdx];
+    if(!p||p.isHero||p.folded||p.allin) return;
+    this._botBusy=true;
     this._bt=setTimeout(()=>{
-      this._bt=null;if(this.street==='idle'||this.street==='showdown')return;
-      const q=this.players[this.actIdx];if(q.isHero||q.folded||q.allin)return;
-      const owe=Math.max(0,this.toCall-q.bet),rng=Math.random();
-      if(owe===0){if(rng<.38){const b=Math.min(q.chips,Math.floor(this.pot*(.35+Math.random()*.65)));this._do(q,'raise',q.bet+Math.max(b,1000));}else this._do(q,'call',0);}
-      else{const po=owe/(this.pot+owe+1);if(po>.6&&rng<.3)this._do(q,'fold');else if(rng<.15&&q.chips>this.minRaise)this._do(q,'raise',Math.min(q.chips+q.bet,this.minRaise+0|Math.random()*this.pot*.4));else this._do(q,'call',0);}
-    },420+Math.random()*680);
+      this._bt=null; this._botBusy=false;
+      if(this.street==='idle'||this.street==='showdown') return;
+      const q=this.players[this.actIdx];
+      if(!q||q.isHero||q.folded||q.allin) return;
+      const owe=Math.max(0,this.toCall-q.bet);
+      const rng=Math.random();
+      if(owe===0){
+        // check or bet
+        if(rng<0.38){
+          const betSz=Math.floor(this.pot*(0.4+Math.random()*0.6));
+          const raiseTotal=Math.min(q.chips+q.bet,
+            Math.max(q.bet+betSz, this.minRaise));
+          this._do(q,'raise',raiseTotal);
+        } else {
+          this._do(q,'call',0);
+        }
+      } else {
+        const po=owe/(this.pot+owe+1);
+        if(po>0.55&&rng<0.30){
+          this._do(q,'fold');
+        } else if(rng<0.15&&q.chips>this.minRaise-q.bet){
+          const raiseTotal=Math.min(q.chips+q.bet,
+            Math.max(this.minRaise, q.bet+Math.floor(this.pot*0.5)));
+          this._do(q,'raise',raiseTotal);
+        } else {
+          this._do(q,'call',0);
+        }
+      }
+    }, 440+Math.random()*600);
   }
-  _emit(){renderState(this._snap());}
-  _snap(){return{handNum:this.hN,street:this.street,pot:this.pot,toCall:this.toCall,minRaise:this.minRaise,board:[...this.board],players:this.players.map(p=>({...p,cards:[...p.cards]})),actIdx:this.actIdx,heroIdx:this.heroIdx,actLog:[...this.actLog]};}
+
+  _emit(){ renderState(this._snap()); }
+  _snap(){
+    return{
+      handNum:this.hN, street:this.street, pot:this.pot,
+      toCall:this.toCall, minRaise:this.minRaise,
+      board:[...this.board],
+      players:this.players.map(p=>({...p,cards:[...p.cards]})),
+      actIdx:this.actIdx, heroIdx:this.heroIdx,
+      actLog:[...this.actLog]
+    };
+  }
 })();
 
 function push(log,name,action,amount){if(log.length<128)log.push({name,action,amount});}
@@ -928,42 +1092,23 @@ function applySettings(){
   WB.newHand();
 }
 function doRebuy(){
-  mock.players.forEach(p => { p.chips = CFG.chips; p.folded = false; p.allin = false; });
+  mock.players.forEach(p => { p.chips = CFG.chips; });
   closeSettings();
+  term.write('sys','system',`rebuy — all players → ${CFG.chips.toLocaleString()} chips`);
   WB.newHand();
-  term.write('sys','system',`rebuy — all players refilled to ${CFG.chips.toLocaleString()} chips`);
 }
 function applyToMock(){
-  const allNames = ['VIKING','GHOST','ORACLE','WRAITH','TITAN','HERO'];
-  const allPos   = ['UTG','UTG+1','HJ','CO','SB','BTN'];
-  // resize player array to cfgPlayers, hero always last
   const n = CFG.players;
-  mock.players = [];
-  for(let i = 0; i < n; i++){
-    const nameIdx = i < n-1 ? i : 5; // hero last
-    mock.players.push({
-      id: i === n-1 ? 'hero' : `p${i+1}`,
-      name: i === n-1 ? 'HERO' : allNames[i],
-      pos: allPos[6-n+i],
-      chips: CFG.chips, bet: 0,
-      folded: false, allin: false,
-      cards: [], isHero: i === n-1
-    });
-  }
-  mock.heroIdx = n-1;
-  mock.NPLAYERS = n;
-  term.write('sys','system',`settings applied: ${n} players, ${CFG.chips.toLocaleString()} chips, blinds ${CFG.sb}/${CFG.bb}`);
+  mock.players  = mock._mkPlayers(n);
+  mock.heroIdx  = n - 1;
+  mock.actIdx   = 0;
+  mock.street   = 'idle';
+  mock.acted    = new Set();
+  term.write('sys','system',
+    `settings: ${n} players · ${CFG.chips.toLocaleString()} chips · blinds ${CFG.sb}/${CFG.bb}`);
 }
 
-// patch mock engine to use CFG for blinds and allin protection
-const _origNewHand = mock.newHand.bind(mock);
-mock.newHand = function(){
-  // Reset players that went bust but no rebuy — give them back starting chips
-  this.players.forEach(p => {
-    if(p.chips <= 0) p.chips = CFG.chips;
-  });
-  _origNewHand();
-};
+// newHand handles bust recovery internally
 
 
 /* Boot */
@@ -979,12 +1124,17 @@ term.write('sys','system','keys: [F] fold  [C] call/check  [R] raise  [N] new ha
 //   Module.onRuntimeInitialized = () => WB.init(Module);
 </script>
 
+<!-- ══ PRODUCTION WASM INTEGRATION ══════════════════════════
+  After running  cd baem/web && bash build_wasm.sh  uncomment:
 
+  <script src="baem_engine.js"></script>
+  <script>
+    Module.onRuntimeInitialized = function() { WB.init(Module); };
+  </script>
 
-<script src="baem_engine.js"></script>
-<script>
-  Module.onRuntimeInitialized = function() { WB.init(Module); };
-</script>
+  Then deploy all three files:
+    index.html  +  baem_engine.js  +  baem_engine.wasm
+═══════════════════════════════════════════════════════════ -->
 
 
 <!-- SETTINGS MODAL -->
